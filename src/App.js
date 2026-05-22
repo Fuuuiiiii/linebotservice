@@ -3,29 +3,26 @@ import "./App.css";
 
 const actionGroups = {
   訂單: ["主產品訂單", "耗材訂單", "訂單進度查詢", "申請退貨"],
-  產品故障: ["床墊", "小黑盤", "itracer", "fora", "td2300"],
+  產品故障: ["床墊", "小黑盤", "itracker", "fora", "td2300"],
   品質獎勵計畫: ["詢問計畫範本", "計畫附件資格", "計畫分母"],
+};
+
+const productIssueGroups = {
+  床墊: ["網路斷線", "更換住民", "通知與實際不符合", "其他問題"],
+  小黑盤: ["數據未上傳", "人數未達標", "感應不良"],
+  itracker: ["網頁問題", "itracker不能用了"],
+  fora: ["量不出來", "數據未上傳"],
+  td2300: ["量測不準", "量不出來", "數據未上傳"],
 };
 
 const primaryActions = ["訂單", "產品故障", "品質獎勵計畫"];
 
-const supportDocs = [
-  {
-    title: "2025 小黑盤數據",
-    type: "PDF",
-    href: "/support-docs/2025小黑盤數據.pdf",
-  },
-  {
-    title: "批次新增住民",
-    type: "PDF",
-    href: "/support-docs/批次新增住民.pdf",
-  },
-  {
-    title: "燈號顯示",
-    type: "GIF",
-    href: "/support-docs/燈號顯示.gif",
-  },
-];
+const orderReplies = {
+  主產品訂單: "要請洽專責業務",
+  耗材訂單: "您的名稱或單位名稱：\n耗材名稱：\n數量：\n我們會盡快跟您聯繫",
+  訂單進度查詢: "客戶名稱：",
+  申請退貨: "客戶名稱：\n產品名稱：\n數量：",
+};
 
 const fallbackReply =
   "我目前可以先協助整理常見客服資料。若要串接模型回覆，請確認後端服務與 .env 設定已啟動。";
@@ -40,13 +37,32 @@ const App = () => {
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [selectedAction, setSelectedAction] = useState("");
+  const [selectedProduct, setSelectedProduct] = useState("");
 
   const latestQuestion = useMemo(
     () => messages.filter((message) => message.role === "user").at(-1)?.text,
     [messages]
   );
 
-  const childActions = selectedAction ? actionGroups[selectedAction] || [] : [];
+  const currentActions = useMemo(() => {
+    if (selectedProduct) {
+      return productIssueGroups[selectedProduct] || [];
+    }
+
+    if (selectedAction) {
+      return actionGroups[selectedAction] || [];
+    }
+
+    return primaryActions;
+  }, [selectedAction, selectedProduct]);
+
+  const addLocalReply = (question, reply) => {
+    setMessages((current) => [
+      ...current,
+      { role: "user", text: question },
+      { role: "bot", text: reply },
+    ]);
+  };
 
   const sendMessage = async (text) => {
     const question = text.trim();
@@ -78,12 +94,12 @@ const App = () => {
       const data = await response.json();
       setMessages((current) => [
         ...current,
-        { role: "bot", text: data.reply || fallbackReply, attachments: supportDocs },
+        { role: "bot", text: data.reply || fallbackReply },
       ]);
     } catch {
       setMessages((current) => [
         ...current,
-        { role: "bot", text: fallbackReply, attachments: supportDocs },
+        { role: "bot", text: fallbackReply },
       ]);
     } finally {
       setIsSending(false);
@@ -93,20 +109,45 @@ const App = () => {
   const handlePrimaryAction = (action) => {
     if (actionGroups[action]) {
       setSelectedAction(action);
+      setSelectedProduct("");
       return;
     }
 
-    setSelectedAction("");
     sendMessage(action);
   };
 
   const handleChildAction = (action) => {
+    if (selectedProduct) {
+      sendMessage(`${selectedAction}：${selectedProduct}：${action}`);
+      return;
+    }
+
+    if (selectedAction === "訂單" && orderReplies[action]) {
+      addLocalReply(`${selectedAction}：${action}`, orderReplies[action]);
+      return;
+    }
+
+    if (selectedAction === "產品故障" && productIssueGroups[action]) {
+      setSelectedProduct(action);
+      return;
+    }
+
     sendMessage(`${selectedAction}：${action}`);
+  };
+
+  const handleBack = () => {
+    if (selectedProduct) {
+      setSelectedProduct("");
+      return;
+    }
+
+    setSelectedAction("");
   };
 
   const handleSubmit = (event) => {
     event.preventDefault();
     setSelectedAction("");
+    setSelectedProduct("");
     sendMessage(input);
   };
 
@@ -142,24 +183,7 @@ const App = () => {
                 key={`${message.role}-${index}`}
               >
                 <div className={`message-bubble ${message.role}`}>
-                  <p>{message.text}</p>
-                  {message.attachments ? (
-                    <div className="attachment-list">
-                      {message.attachments.map((attachment) => (
-                        <a
-                          className="attachment-card"
-                          href={attachment.href}
-                          key={attachment.href}
-                          rel="noreferrer"
-                          target="_blank"
-                        >
-                          <span className="attachment-label">{attachment.type}</span>
-                          <strong>{attachment.title}</strong>
-                          <span>開啟相關支援文件</span>
-                        </a>
-                      ))}
-                    </div>
-                  ) : null}
+                  <p style={{ whiteSpace: "pre-line" }}>{message.text}</p>
                 </div>
               </div>
             ))}
@@ -167,11 +191,11 @@ const App = () => {
 
           <div className="quick-actions">
             {selectedAction ? (
-              <button onClick={() => setSelectedAction("")} type="button">
+              <button onClick={handleBack} type="button">
                 返回
               </button>
             ) : null}
-            {(selectedAction ? childActions : primaryActions).map((action) => (
+            {currentActions.map((action) => (
               <button
                 disabled={isSending}
                 key={action}
