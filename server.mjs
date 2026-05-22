@@ -1,6 +1,5 @@
-import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import express from "express";
+import { middleware, messagingApi } from "@line/bot-sdk";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
@@ -14,20 +13,71 @@ const modelProvider = process.env.MODEL_PROVIDER || "ollama";
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
 const ollamaModel = process.env.OLLAMA_MODEL || "llama3.2:3b";
 
-const contentTypes = {
-  ".css": "text/css; charset=utf-8",
-  ".gif": "image/gif",
-  ".html": "text/html; charset=utf-8",
-  ".ico": "image/x-icon",
-  ".jpeg": "image/jpeg",
-  ".jpg": "image/jpeg",
-  ".js": "application/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".map": "application/json; charset=utf-8",
-  ".pdf": "application/pdf",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".txt": "text/plain; charset=utf-8",
+const lineConfig = {
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || "",
+  channelSecret: process.env.LINE_CHANNEL_SECRET || "",
+};
+
+const client = new messagingApi.MessagingApiClient({
+  channelAccessToken: lineConfig.channelAccessToken,
+});
+
+const quickReplyGroups = {
+  primary: ["訂單", "產品故障", "品質獎勵計畫"],
+  order: ["主產品訂單", "耗材訂單", "訂單進度查詢", "申請退貨"],
+  product: ["床墊", "小黑盤", "itracker", "fora", "td2300"],
+  reward: ["詢問計畫範本", "計畫附件資格", "計畫分母"],
+  床墊: ["網路斷線", "更換住民", "通知與實際不符合", "其他問題"],
+  小黑盤: ["數據未上傳", "人數未達標", "感應不良"],
+  itracker: ["網頁問題", "itracker不能用了"],
+  fora: ["量不出來", "數據未上傳"],
+  td2300: ["量測不準", "量不出來", "數據未上傳"],
+};
+
+const toQuickReply = (labels) => ({
+  items: labels.slice(0, 13).map((item) => {
+    const option = typeof item === "string" ? { label: item, text: item } : item;
+
+    return {
+    type: "action",
+    action: {
+      type: "message",
+      label: option.label,
+      text: option.text,
+    },
+  };
+  }),
+});
+
+const resolveQuickReplyLabels = (message = "") => {
+  const normalized = String(message).trim();
+
+  if (normalized === "訂單") {
+    return quickReplyGroups.order.map((label) => ({
+      label,
+      text: `訂單：${label}`,
+    }));
+  }
+
+  if (normalized === "產品故障") {
+    return quickReplyGroups.product;
+  }
+
+  if (normalized === "品質獎勵計畫") {
+    return quickReplyGroups.reward.map((label) => ({
+      label,
+      text: `品質獎勵計畫：${label}`,
+    }));
+  }
+
+  if (quickReplyGroups[normalized]) {
+    return quickReplyGroups[normalized].map((label) => ({
+      label,
+      text: `產品故障：${normalized}：${label}`,
+    }));
+  }
+
+  return quickReplyGroups.primary;
 };
 
 const menuReplies = new Map([
@@ -119,23 +169,6 @@ const resolveKeywordReply = (message) => {
   return normalizedMenuReplies.get(normalized) || findProductIssueReply(normalized);
 };
 
-const readRequestBody = async (request) => {
-  const chunks = [];
-
-  for await (const chunk of request) {
-    chunks.push(chunk);
-  }
-
-  return Buffer.concat(chunks).toString("utf8");
-};
-
-const sendJson = (response, status, data) => {
-  response.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-  });
-  response.end(JSON.stringify(data));
-};
-
 const buildPrompt = ({ product, message }) => [
   {
     role: "system",
@@ -211,55 +244,60 @@ const askModel = async (payload) => {
   return askOllama(payload);
 };
 
-const serveStaticFile = async (request, response) => {
-  const requestUrl = new URL(request.url, `http://${request.headers.host}`);
-  const rawPath = decodeURIComponent(requestUrl.pathname);
-  const safePath = path
-    .normalize(rawPath)
-    .replace(/^[/\\]+/, "")
-    .replace(/^(\.\.[/\\])+/, "");
-  const filePath = path.join(buildDir, safePath || "index.html");
-  const resolvedPath = existsSync(filePath) ? filePath : path.join(buildDir, "index.html");
-  const extension = path.extname(resolvedPath);
+const app = express();
 
-  try {
-    const file = await readFile(resolvedPath);
-    response.writeHead(200, {
-      "Content-Type": contentTypes[extension] || "application/octet-stream",
+// LINE Webhook
+app.post("/webhook", middleware(lineConfig), (req, res) => {
+  Promise.all(req.body.events.map(handleEvent))
+    .then((result) => res.json(result))
+    .catch((err) => {
+      console.error(err);
+      res.status(500).end();
     });
-    response.end(file);
-  } catch {
-    response.writeHead(404, {
-      "Content-Type": "text/plain; charset=utf-8",
-    });
-    response.end("Not found");
-  }
-};
-
-const server = createServer(async (request, response) => {
-  if (request.method === "POST" && request.url === "/api/chat") {
-    try {
-      const body = JSON.parse(await readRequestBody(request));
-      const reply = await askModel(body);
-      sendJson(response, 200, { reply });
-    } catch (error) {
-      sendJson(response, 500, {
-        error: error.message || "API error",
-      });
-    }
-    return;
-  }
-
-  if (request.method === "GET") {
-    await serveStaticFile(request, response);
-    return;
-  }
-
-  response.writeHead(405);
-  response.end();
 });
 
-server.listen(port, "0.0.0.0", () => {
+async function handleEvent(event) {
+  if (event.type !== "message" || event.message.type !== "text") {
+    return null;
+  }
+
+  const userMessage = event.message.text;
+  const reply = await askModel({ message: userMessage });
+  const quickReplyLabels = resolveQuickReplyLabels(userMessage);
+
+  return client.replyMessage({
+    replyToken: event.replyToken,
+    messages: [
+      {
+        type: "text",
+        text: reply,
+        quickReply: toQuickReply(quickReplyLabels),
+      },
+    ],
+  });
+}
+
+// API for web chat
+app.post("/api/chat", express.json(), async (req, res) => {
+  try {
+    const body = req.body;
+    const reply = await askModel(body);
+    res.json({ reply });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "API error" });
+  }
+});
+
+// Serve static files
+app.use(express.static(buildDir));
+
+// Fallback to index.html for React Router
+app.get("*", (req, res) => {
+  const indexPath = path.join(buildDir, "index.html");
+  res.sendFile(indexPath);
+});
+
+app.listen(port, "0.0.0.0", () => {
   console.log(`Customer service chatbot running at http://0.0.0.0:${port}`);
   console.log(`Model provider: ${modelProvider}`);
 
