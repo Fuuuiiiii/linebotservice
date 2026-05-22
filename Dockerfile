@@ -1,23 +1,19 @@
-# Start your image with a node base image
 FROM node:22-alpine
 
-# The /app directory should act as the main application directory
 WORKDIR /app
+ENV MODEL_PROVIDER=ollama
+ENV OLLAMA_BASE_URL=http://host.docker.internal:11434
+ENV OLLAMA_MODEL=llama3.2:3b
 
-# Copy the app package and package-lock.json file
 COPY package*.json ./
-
-# Copy local directories to the current local directory of our docker image (/app)
+COPY server.mjs ./
 COPY ./src ./src
 COPY ./public ./public
 
-# Install node packages, install serve, build the app, and remove dependencies at the end
 RUN npm install \
-    && npm install -g serve@latest \
     && npm run build \
-    && rm -fr node_modules
+    && npm prune --omit=dev
 
 EXPOSE 3000
 
-# Start the app using serve command
-CMD [ "serve", "-s", "build" ]
+CMD [ "npm", "run", "serve:api" ]

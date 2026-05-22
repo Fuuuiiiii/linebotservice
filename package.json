@@ -1,16 +1,17 @@
 {
-  "name": "welcome-to-docker",
+  "name": "customer-service-chatbot",
   "version": "0.1.0",
   "private": true,
+  "homepage": ".",
   "dependencies": {
+    "dotenv": "^16.6.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-particles": "^2.9.3",
-    "react-scripts": "5.0.1",
-    "tsparticles": "^2.9.3"
+    "react-scripts": "5.0.1"
   },
   "scripts": {
     "start": "react-scripts start",
+    "serve:api": "node server.mjs",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"

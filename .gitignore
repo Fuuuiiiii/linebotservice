@@ -88,6 +88,10 @@ dist
 # https://nextjs.org/blog/next-9-1#public-directory-support
 # public
 
+# Support documents are source assets. Allow files pasted here to be tracked.
+!public/support-docs/
+!public/support-docs/**
+
 # vuepress build output
 .vuepress/dist
 
