@@ -18,8 +18,9 @@ const productIssueGroups = {
 const primaryActions = ["訂單", "產品故障", "品質獎勵計畫"];
 
 const orderReplies = {
-  主產品訂單: "要請洽專責業務",
-  耗材訂單: "您的名稱或單位名稱：\n耗材名稱：\n數量：\n我們會盡快跟您聯繫",
+  主產品訂單:
+    "您的名稱或單位名稱：\n產品名稱：\n數量：\n會請負責的業務同仁盡快跟您聯繫",
+  耗材訂單: "您的名稱或單位名稱：\n產品名稱：\n數量：\n我們會盡快跟您聯繫",
   訂單進度查詢: "客戶名稱：",
   申請退貨: "客戶名稱：\n產品名稱：\n數量：",
 };
@@ -38,6 +39,7 @@ const App = () => {
   const [isSending, setIsSending] = useState(false);
   const [selectedAction, setSelectedAction] = useState("");
   const [selectedProduct, setSelectedProduct] = useState("");
+  const [pendingOrderType, setPendingOrderType] = useState("");
 
   const latestQuestion = useMemo(
     () => messages.filter((message) => message.role === "user").at(-1)?.text,
@@ -106,6 +108,50 @@ const App = () => {
     }
   };
 
+  const sendOrder = async (text) => {
+    const rawMessage = text.trim();
+
+    if (!rawMessage || isSending || !pendingOrderType) {
+      return;
+    }
+
+    setInput("");
+    setIsSending(true);
+    setMessages((current) => [...current, { role: "user", text: rawMessage }]);
+
+    try {
+      const response = await fetch("/api/order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          orderType: pendingOrderType,
+          rawMessage,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Order API unavailable");
+      }
+
+      setMessages((current) => [
+        ...current,
+        { role: "bot", text: data.reply || "已收到您的訂單，我們會盡快跟您聯繫。" },
+      ]);
+      setPendingOrderType("");
+    } catch (error) {
+      setMessages((current) => [
+        ...current,
+        { role: "bot", text: error.message || "訂單送出失敗，請稍後再試。" },
+      ]);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
   const handlePrimaryAction = (action) => {
     if (actionGroups[action]) {
       setSelectedAction(action);
@@ -124,6 +170,9 @@ const App = () => {
 
     if (selectedAction === "訂單" && orderReplies[action]) {
       addLocalReply(`${selectedAction}：${action}`, orderReplies[action]);
+      if (action === "主產品訂單" || action === "耗材訂單") {
+        setPendingOrderType(action);
+      }
       return;
     }
 
@@ -141,6 +190,7 @@ const App = () => {
       return;
     }
 
+    setPendingOrderType("");
     setSelectedAction("");
   };
 
@@ -148,6 +198,12 @@ const App = () => {
     event.preventDefault();
     setSelectedAction("");
     setSelectedProduct("");
+
+    if (pendingOrderType) {
+      sendOrder(input);
+      return;
+    }
+
     sendMessage(input);
   };
 

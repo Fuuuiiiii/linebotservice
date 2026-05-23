@@ -12,11 +12,14 @@ const port = Number(process.env.PORT || 3000);
 const modelProvider = process.env.MODEL_PROVIDER || "ollama";
 const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
 const ollamaModel = process.env.OLLAMA_MODEL || "llama3.2:3b";
+const googleOrderWebhookUrl = process.env.GOOGLE_ORDER_WEBHOOK_URL || "";
 
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || "",
   channelSecret: process.env.LINE_CHANNEL_SECRET || "",
 };
+
+const pendingLineOrders = new Map();
 
 const client = new messagingApi.MessagingApiClient({
   channelAccessToken: lineConfig.channelAccessToken,
@@ -32,6 +35,12 @@ const quickReplyGroups = {
   itracker: ["網頁問題", "itracker不能用了"],
   fora: ["量不出來", "數據未上傳"],
   td2300: ["量測不準", "量不出來", "數據未上傳"],
+};
+
+const orderInstructionReplies = {
+  主產品訂單:
+    "您的名稱或單位名稱：\n產品名稱：\n數量：\n會請負責的業務同仁盡快跟您聯繫",
+  耗材訂單: "您的名稱或單位名稱：\n產品名稱：\n數量：\n我們會盡快跟您聯繫",
 };
 
 const toQuickReply = (labels) => ({
@@ -84,15 +93,15 @@ const menuReplies = new Map([
   ["訂單", "請選擇：主產品訂單、耗材訂單、訂單進度查詢、申請退貨"],
   ["產品故障", "請選擇產品：床墊、小黑盤、itracker、fora、td2300"],
   ["品質獎勵計畫", "請選擇：詢問計畫範本、計畫附件資格、計畫分母"],
-  ["主產品訂單", "要請洽專責業務"],
-  ["訂單：主產品訂單", "要請洽專責業務"],
+  ["主產品訂單", orderInstructionReplies.主產品訂單],
+  ["訂單：主產品訂單", orderInstructionReplies.主產品訂單],
   [
     "耗材訂單",
-    "您的名稱或單位名稱：\n耗材名稱：\n數量：\n我們會盡快跟您聯繫",
+    orderInstructionReplies.耗材訂單,
   ],
   [
     "訂單：耗材訂單",
-    "您的名稱或單位名稱：\n耗材名稱：\n數量：\n我們會盡快跟您聯繫",
+    orderInstructionReplies.耗材訂單,
   ],
   ["訂單進度查詢", "客戶名稱："],
   ["訂單：訂單進度查詢", "客戶名稱："],
@@ -244,6 +253,107 @@ const askModel = async (payload) => {
   return askOllama(payload);
 };
 
+const pickField = (message, labels) => {
+  const lines = String(message || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const label of labels) {
+    const normalizedLabel = label.replace(/[：:]\s*$/, "");
+    const match = lines.find((line) =>
+      new RegExp(`^${normalizedLabel}\\s*[：:]\\s*(.+)$`).test(line)
+    );
+
+    if (match) {
+      return match.replace(new RegExp(`^${normalizedLabel}\\s*[：:]\\s*`), "").trim();
+    }
+  }
+
+  return "";
+};
+
+const parseOrderMessage = (message = "") => {
+  const lines = String(message)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return {
+    customerName: pickField(message, ["客戶名稱", "您的名稱或單位名稱", "名稱", "單位名稱"]) || lines[0] || "",
+    product: pickField(message, ["產品", "產品名稱", "耗材名稱"]) || lines[1] || "",
+    quantity: pickField(message, ["數量"]) || lines[2] || "",
+  };
+};
+
+const normalizeOrder = (body = {}) => {
+  const parsed = parseOrderMessage(body.rawMessage || body.message || "");
+
+  return {
+    orderType: String(body.orderType || "").trim(),
+    customerName: String(body.customerName || parsed.customerName || "").trim(),
+    product: String(body.product || parsed.product || "").trim(),
+    quantity: String(body.quantity || parsed.quantity || "").trim(),
+  };
+};
+
+const getLineUserKey = (event) => {
+  const source = event.source || {};
+
+  return source.userId || source.groupId || source.roomId || "";
+};
+
+const validateOrder = (order) => {
+  const missingFields = [];
+
+  if (!["主產品訂單", "耗材訂單"].includes(order.orderType)) {
+    missingFields.push("訂單類型");
+  }
+
+  if (!order.customerName) {
+    missingFields.push("客戶名稱");
+  }
+
+  if (!order.product) {
+    missingFields.push("產品");
+  }
+
+  if (!order.quantity) {
+    missingFields.push("數量");
+  }
+
+  return missingFields;
+};
+
+const sendOrderToGoogle = async (order) => {
+  if (!googleOrderWebhookUrl) {
+    throw new Error("Missing GOOGLE_ORDER_WEBHOOK_URL");
+  }
+
+  const response = await fetch(googleOrderWebhookUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(order),
+  });
+
+  const text = await response.text();
+  let data = {};
+
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.error || `Google order webhook failed (HTTP ${response.status})`);
+  }
+
+  return data;
+};
+
 const app = express();
 
 // LINE Webhook
@@ -262,6 +372,77 @@ async function handleEvent(event) {
   }
 
   const userMessage = event.message.text;
+  const userKey = getLineUserKey(event);
+  const normalizedMessage = normalizeMessage(userMessage);
+
+  if (["訂單：主產品訂單", "主產品訂單", "訂單：耗材訂單", "耗材訂單"].includes(normalizedMessage)) {
+    const orderType = normalizedMessage.includes("主產品") ? "主產品訂單" : "耗材訂單";
+
+    if (userKey) {
+      pendingLineOrders.set(userKey, orderType);
+    }
+
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [
+        {
+          type: "text",
+          text: orderInstructionReplies[orderType],
+          quickReply: toQuickReply(quickReplyGroups.primary),
+        },
+      ],
+    });
+  }
+
+  if (userKey && pendingLineOrders.has(userKey)) {
+    const orderType = pendingLineOrders.get(userKey);
+    const order = normalizeOrder({
+      orderType,
+      rawMessage: userMessage,
+    });
+    const missingFields = validateOrder(order);
+
+    if (missingFields.length) {
+      return client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text: `請補齊：${missingFields.join("、")}\n\n格式：\n客戶名稱：\n產品：\n數量：`,
+          },
+        ],
+      });
+    }
+
+    try {
+      await sendOrderToGoogle(order);
+      pendingLineOrders.delete(userKey);
+
+      return client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text: "已收到您的訂單，我們會盡快跟您聯繫。",
+            quickReply: toQuickReply(quickReplyGroups.primary),
+          },
+        ],
+      });
+    } catch (error) {
+      console.error(error);
+
+      return client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text: "訂單送出失敗，請稍後再試或聯繫客服人員。",
+          },
+        ],
+      });
+    }
+  }
+
   const reply = await askModel({ message: userMessage });
   const quickReplyLabels = resolveQuickReplyLabels(userMessage);
 
@@ -285,6 +466,30 @@ app.post("/api/chat", express.json(), async (req, res) => {
     res.json({ reply });
   } catch (error) {
     res.status(500).json({ error: error.message || "API error" });
+  }
+});
+
+app.post("/api/order", express.json(), async (req, res) => {
+  try {
+    const order = normalizeOrder(req.body);
+    const missingFields = validateOrder(order);
+
+    if (missingFields.length) {
+      res.status(400).json({
+        error: `請補齊：${missingFields.join("、")}`,
+      });
+      return;
+    }
+
+    const result = await sendOrderToGoogle(order);
+
+    res.json({
+      ok: true,
+      reply: "已收到您的訂單，我們會盡快跟您聯繫。",
+      result,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || "Order API error" });
   }
 });
 
